@@ -3,6 +3,21 @@ import { Emitter } from "./emitter.js";
 import { TransportState } from "./transport-state.js";
 
 /**
+ * A single CRLF keep-alive latency measurement.
+ * @public
+ */
+export interface LatencySample {
+  /** Wall-clock time (milliseconds since epoch) when the sample was recorded. */
+  timestamp: number;
+  /**
+   * Round-trip time in milliseconds from sending the CRLF ping to receiving
+   * the pong. `null` when the pong was not received within the debounce window
+   * (i.e. the keep-alive timed out).
+   */
+  rttMs: number | null;
+}
+
+/**
  * Transport layer interface expected by the `UserAgent`.
  *
  * @remarks
@@ -36,6 +51,18 @@ import { TransportState } from "./transport-state.js";
  * @public
  */
 export interface Transport extends CoreTransport {
+  /**
+   * CRLF keep-alive round-trip latency history for this connection.
+   *
+   * @remarks
+   * Optionally implemented by transports that support CRLF keep-alive probing
+   * (RFC 5626 §3.5.1 / RFC 7118 §6). Contains up to `keepAliveHistorySize`
+   * most-recent samples. A `null` `rttMs` entry indicates the pong was not
+   * received within the debounce window (timeout). `undefined` when the
+   * transport does not support CRLF latency tracking.
+   */
+  readonly crlfLatencyHistory?: ReadonlyArray<LatencySample>;
+
   /**
    * Transport state.
    *

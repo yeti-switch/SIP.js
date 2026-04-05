@@ -1,6 +1,6 @@
 import { Emitter, EmitterImpl } from "../../../api/emitter.js";
 import { StateTransitionError } from "../../../api/exceptions/state-transition.js";
-import { Transport as TransportDefinition } from "../../../api/transport.js";
+import { LatencySample, Transport as TransportDefinition } from "../../../api/transport.js";
 import { TransportState } from "../../../api/transport-state.js";
 import { Grammar } from "../../../grammar/grammar.js";
 import { Logger } from "../../../core/log/logger.js";
@@ -16,6 +16,7 @@ export class Transport implements TransportDefinition {
     connectionTimeout: 5,
     keepAliveInterval: 0,
     keepAliveDebounce: 10,
+    keepAliveHistorySize: 60,
     traceSip: true
   };
 
@@ -41,6 +42,8 @@ export class Transport implements TransportDefinition {
 
   private keepAliveInterval: number | undefined;
   private keepAliveDebounceTimeout: number | undefined;
+  private keepAliveSentAt: number | undefined;
+  private _crlfLatencyHistory: Array<LatencySample> = [];
 
   private logger: Logger;
   private transitioningState = false;
@@ -144,6 +147,20 @@ export class Transport implements TransportDefinition {
    */
   public get ws(): WebSocket | undefined {
     return this._ws;
+  }
+
+  /**
+   * CRLF keep-alive latency history for this connection.
+   *
+   * @remarks
+   * Contains up to `keepAliveHistorySize` most recent samples. Each entry
+   * records the wall-clock time and round-trip time of a keep-alive exchange.
+   * A `null` rttMs indicates the pong was not received (timeout).
+   * History is retained across reconnections so that post-mortem analysis
+   * remains possible after a brief outage.
+   */
+  public get crlfLatencyHistory(): ReadonlyArray<LatencySample> {
+    return this._crlfLatencyHistory;
   }
 
   /**
@@ -444,6 +461,11 @@ export class Transport implements TransportDefinition {
     // CRLF Keep Alive response from server. Clear our keep alive timeout.
     if (/^(\r\n)+$/.test(data)) {
       this.clearKeepAliveTimeout();
+      if (this.keepAliveSentAt !== undefined) {
+        const rttMs = performance.now() - this.keepAliveSentAt;
+        this.keepAliveSentAt = undefined;
+        this.pushLatencySample(rttMs);
+      }
       if (this.configuration.traceSip === true) {
         this.logger.log("Received WebSocket message with CRLF Keep Alive response");
       }
@@ -702,11 +724,32 @@ export class Transport implements TransportDefinition {
       return Promise.resolve();
     }
 
+    this.keepAliveSentAt = performance.now();
+
     this.keepAliveDebounceTimeout = setTimeout(() => {
       this.clearKeepAliveTimeout();
+      // Pong was not received within the debounce window — record a timeout.
+      if (this.keepAliveSentAt !== undefined) {
+        this.pushLatencySample(null);
+        this.keepAliveSentAt = undefined;
+      }
     }, this.configuration.keepAliveDebounce * 1000);
 
     return this.send("\r\n\r\n");
+  }
+
+  /**
+   * Append a latency sample to the circular history buffer.
+   */
+  private pushLatencySample(rttMs: number | null): void {
+    const maxSize = this.configuration.keepAliveHistorySize;
+    if (maxSize <= 0) {
+      return;
+    }
+    this._crlfLatencyHistory.push({ timestamp: Date.now(), rttMs });
+    if (this._crlfLatencyHistory.length > maxSize) {
+      this._crlfLatencyHistory.splice(0, this._crlfLatencyHistory.length - maxSize);
+    }
   }
 
   /**

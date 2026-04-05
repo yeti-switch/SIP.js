@@ -27,6 +27,13 @@ export interface TransportOptions {
   keepAliveDebounce?: number;
 
   /**
+   * Maximum number of CRLF keep-alive latency samples to retain per connection.
+   * Set to 0 to disable history collection.
+   * @defaultValue `60`
+   */
+  keepAliveHistorySize?: number;
+
+  /**
    * If true, messages sent and received by the transport are logged.
    * @defaultValue `true`
    */

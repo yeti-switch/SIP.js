@@ -32,7 +32,7 @@ import { Publisher } from "./publisher.js";
 import { Registerer } from "./registerer.js";
 import { Session } from "./session.js";
 import { Subscription } from "./subscription.js";
-import { Transport } from "./transport.js";
+import { LatencySample, Transport } from "./transport.js";
 import { UserAgentDelegate } from "./user-agent-delegate.js";
 import { SIPExtension, UserAgentOptions, UserAgentRegisteredOptionTags } from "./user-agent-options.js";
 import { UserAgentState } from "./user-agent-state.js";
@@ -374,6 +374,16 @@ export class UserAgent {
   }
 
   /**
+   * All active transport connections, one per resolved server address.
+   * @remarks
+   * In the common single-transport case this array has exactly one element.
+   * Mirrors the indices of {@link userAgentCores} and {@link transportLatencyHistories}.
+   */
+  public get transports(): ReadonlyArray<Transport> {
+    return this._transports;
+  }
+
+  /**
    * All active user agent cores, one per transport connection.
    * @remarks
    * Use this when constructing per-flow `Registerer` instances for RFC 5626 outbound support.
@@ -381,6 +391,17 @@ export class UserAgent {
    */
   public get userAgentCores(): ReadonlyArray<UserAgentCore> {
     return this._userAgentCores;
+  }
+
+  /**
+   * CRLF keep-alive latency histories, one entry per transport connection.
+   * @remarks
+   * Index `i` corresponds to `transports[i]`. Returns an empty array for
+   * transports that do not implement CRLF latency tracking (e.g. test fakes).
+   * Each entry is the transport's `crlfLatencyHistory` or `[]` if unavailable.
+   */
+  public get transportCrlfLatencyHistories(): ReadonlyArray<ReadonlyArray<LatencySample>> {
+    return this._transports.map((t) => t.crlfLatencyHistory ?? []);
   }
 
   /**
