@@ -1,4 +1,5 @@
 import { URI } from "../grammar/uri.js";
+import { UserAgentCore } from "../core/user-agent-core/user-agent-core.js";
 
 /**
  * Options for {@link Registerer} constructor.
@@ -47,6 +48,16 @@ export interface RegistererOptions {
    * @defaultValue domain portion of the user agent's uri
    */
   registrar?: URI;
+
+  /**
+   * The UserAgentCore to use for sending REGISTER requests.
+   * @remarks
+   * When using multi-transport outbound (RFC 5626), pass the specific core from
+   * `UserAgent.userAgentCores[i]` so that the REGISTER is sent over the
+   * corresponding transport connection. If not provided, defaults to
+   * `userAgent.userAgentCore` (the first/only core).
+   */
+  userAgentCore?: UserAgentCore;
 
   /**
    * Determines when a re-REGISTER request is sent. The value should be specified as a percentage of the expiration time (between 50 and 99).

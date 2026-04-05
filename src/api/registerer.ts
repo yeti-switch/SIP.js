@@ -5,6 +5,7 @@ import { Logger } from "../core/log/logger.js";
 import { C } from "../core/messages/methods/constants.js";
 import { OutgoingRegisterRequest } from "../core/messages/methods/register.js";
 import { OutgoingRequestMessage } from "../core/messages/outgoing-request-message.js";
+import { UserAgentCore } from "../core/user-agent-core/user-agent-core.js";
 import { Emitter, EmitterImpl } from "./emitter.js";
 import { RequestPendingError } from "./exceptions/request-pending.js";
 import { RegistererOptions } from "./registerer-options.js";
@@ -29,6 +30,7 @@ export class Registerer {
   private options: RegistererOptions;
   private request: OutgoingRequestMessage;
   private userAgent: UserAgent;
+  private core: UserAgentCore;
 
   private registrationExpiredTimer: number | undefined;
   private registrationTimer: number | undefined;
@@ -102,13 +104,20 @@ export class Registerer {
     }
 
     const registrar = this.options.registrar;
-    const fromURI = (this.options.params && this.options.params.fromUri) || userAgent.userAgentCore.configuration.aor;
+    this.core = this.options.userAgentCore ?? userAgent.userAgentCore;
+    const core = this.core;
+    const fromURI = (this.options.params && this.options.params.fromUri) || core.configuration.aor;
     const toURI = (this.options.params && this.options.params.toUri) || userAgent.configuration.uri;
     const params = this.options.params || {};
     const extraHeaders = (options.extraHeaders || []).slice();
 
+    // RFC 5626 §4.2: a flow registration MUST include "Supported: outbound".
+    if (this.options.regId) {
+      extraHeaders.push("Supported: outbound");
+    }
+
     // Build the request
-    this.request = userAgent.userAgentCore.makeOutgoingRequestMessage(
+    this.request = core.makeOutgoingRequestMessage(
       C.REGISTER,
       registrar,
       fromURI,
@@ -144,6 +153,9 @@ export class Registerer {
           case "registrar":
             this.logger.log("· " + key + ": " + value);
             break;
+          case "userAgentCore":
+            this.logger.log("· " + key + ": [UserAgentCore]");
+            break;
           default:
             this.logger.log("· " + key + ": " + JSON.stringify(value));
         }
@@ -158,7 +170,7 @@ export class Registerer {
   }
 
   /** Default registerer options. */
-  private static defaultOptions(): Required<RegistererOptions> {
+  private static defaultOptions(): Omit<Required<RegistererOptions>, "userAgentCore"> {
     return {
       expires: Registerer.defaultExpires,
       extraContactHeaderParams: [],
@@ -342,7 +354,7 @@ export class Registerer {
 
     this.waitingToggle(true);
 
-    const outgoingRegisterRequest = this.userAgent.userAgentCore.register(this.request, {
+    const outgoingRegisterRequest = this.core.register(this.request, {
       onAccept: (response): void => {
         let expires: number | undefined;
 
@@ -592,7 +604,7 @@ export class Registerer {
 
     this.waitingToggle(true);
 
-    const outgoingRegisterRequest = this.userAgent.userAgentCore.register(this.request, {
+    const outgoingRegisterRequest = this.core.register(this.request, {
       onAccept: (response): void => {
         this._contacts = response.message.getHeaders("contact"); // Update contacts
         this.unregistered();

@@ -262,6 +262,29 @@ export interface UserAgentOptions {
   sipjsId?: string;
 
   /**
+   * A factory for resolving a WSS server URL to one or more WSS URLs.
+   * @remarks
+   * When provided, called during `start()` with `transportOptions.server` as the argument.
+   * The returned array determines how many transport connections are established — one per URL.
+   * Each connection gets its own `UserAgentCore` and, when used with a `Registerer` that has
+   * `regId` set, participates in RFC 5626 multi-flow outbound registration.
+   *
+   * If not provided, a single connection to `transportOptions.server` is used (default behaviour).
+   *
+   * DNS resolution is intentionally left to the application: browsers have no DNS API, so the
+   * resolver typically fetches the server list from a backend endpoint.
+   *
+   * @example
+   * ```typescript
+   * resolveServers: async (server) => {
+   *   const { servers } = await fetch("/api/sip-servers").then(r => r.json());
+   *   return servers; // ["wss://1.2.3.4:5061/ws", "wss://1.2.3.5:5061/ws"]
+   * }
+   * ```
+   */
+  resolveServers?: (server: string) => Promise<Array<string>>;
+
+  /**
    * A constructor function for the user agent's `Transport`.
    * @remarks
    * For more information about creating your own transport see `Transport`.

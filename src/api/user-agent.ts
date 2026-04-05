@@ -73,8 +73,10 @@ export class UserAgent {
   private _instanceId: string;
   private _state: UserAgentState = UserAgentState.Stopped;
   private _stateEventEmitter: EmitterImpl<UserAgentState>;
-  private _transport: Transport;
-  private _userAgentCore: UserAgentCore;
+  private _transports: Array<Transport> = [];
+  private _userAgentCores: Array<UserAgentCore> = [];
+  /** Per-transport reconnection attempt counters (index mirrors _transports). */
+  private _reconnectionAttempts: Array<number> = [];
 
   /** Logger. */
   private logger: Logger;
@@ -212,13 +214,6 @@ export class UserAgent {
       this.logger.warn(deprecatedMessage);
     }
 
-    // Initialize Transport
-    this._transport = new this.options.transportConstructor(
-      this.getLogger("sip.Transport"),
-      this.options.transportOptions
-    );
-    this.initTransportCallbacks();
-
     // Initialize Contact
     this._contact = this.initContact();
 
@@ -228,8 +223,10 @@ export class UserAgent {
       throw new Error("Invalid instanceId.");
     }
 
-    // Initialize UserAgentCore
-    this._userAgentCore = this.initCore();
+    // Initialize Transport(s) and UserAgentCore(s).
+    // Full multi-transport construction happens in start() after resolveServers() is called.
+    // Here we create a single placeholder transport so that the public getters work before start().
+    this.addTransportAndCore(this.options.transportOptions);
   }
 
   /**
@@ -280,6 +277,7 @@ export class UserAgent {
       preloadedRouteSet: [],
       reconnectionAttempts: 0,
       reconnectionDelay: 4,
+      resolveServers: undefined as unknown as (server: string) => Promise<Array<string>>,
       sendInitialProvisionalResponse: true,
       sessionDescriptionHandlerFactory: defaultSessionDescriptionHandlerFactory(),
       sessionDescriptionHandlerFactoryOptions: {},
@@ -359,16 +357,30 @@ export class UserAgent {
 
   /**
    * User agent transport.
+   * @remarks
+   * When multiple transports are active (multi-flow outbound), returns the first one.
    */
   public get transport(): Transport {
-    return this._transport;
+    return this._transports[0];
   }
 
   /**
    * User agent core.
+   * @remarks
+   * When multiple cores are active (multi-flow outbound), returns the first one.
    */
   public get userAgentCore(): UserAgentCore {
-    return this._userAgentCore;
+    return this._userAgentCores[0];
+  }
+
+  /**
+   * All active user agent cores, one per transport connection.
+   * @remarks
+   * Use this when constructing per-flow `Registerer` instances for RFC 5626 outbound support.
+   * In the common single-transport case this array has exactly one element.
+   */
+  public get userAgentCores(): ReadonlyArray<UserAgentCore> {
+    return this._userAgentCores;
   }
 
   /**
@@ -386,21 +398,20 @@ export class UserAgent {
   }
 
   /**
-   * True if transport is connected.
+   * True if at least one transport is connected.
    */
   public isConnected(): boolean {
-    return this.transport.isConnected();
+    return this._transports.some((t) => t.isConnected());
   }
 
   /**
-   * Reconnect the transport.
+   * Reconnect all transports.
    */
   public reconnect(): Promise<void> {
     if (this.state === UserAgentState.Stopped) {
       return Promise.reject(new Error("User agent stopped."));
     }
-    // Make sure we don't call synchronously
-    return Promise.resolve().then(() => this.transport.connect());
+    return Promise.resolve().then(() => this.connectAllTransports());
   }
 
   /**
@@ -431,7 +442,40 @@ export class UserAgent {
     // Transition state
     this.transitionState(UserAgentState.Started);
 
-    return this.transport.connect();
+    if (!this.options.resolveServers) {
+      // Single-transport path (default behaviour, no resolver provided).
+      return this._transports[0].connect();
+    }
+
+    // Multi-transport path: resolve server URL → list of WSS URLs, then
+    // rebuild transports/cores based on the resolved list.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const baseServer = (this.options.transportOptions as any)?.server ?? "";
+    return this.options.resolveServers(baseServer).then((servers) => {
+      if (servers.length === 0) {
+        throw new Error("resolveServers returned an empty list.");
+      }
+
+      // Tear down the placeholder transport/core created in the constructor.
+      this._transports.forEach((t) =>
+        t.dispose().catch(() => {
+          /* ignore */
+        })
+      );
+      this._userAgentCores.forEach((c) => c.dispose());
+      this._transports = [];
+      this._userAgentCores = [];
+      this._reconnectionAttempts = [];
+
+      // Build one (transport, core) pair per resolved server.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      servers.forEach((server) => this.addTransportAndCore({ ...(this.options.transportOptions as any), server }));
+
+      this.logger.log(`Multi-transport: ${servers.length} connection(s): ${servers.join(", ")}`);
+
+      // Connect all transports in parallel; resolve once at least one succeeds.
+      return this.connectAllTransports();
+    });
   }
 
   /**
@@ -474,16 +518,17 @@ export class UserAgent {
 
     // The default behavior is to cleanup dialogs and registrations. This is not that...
     if (!this.options.gracefulShutdown) {
-      // Dispose of the transport (disconnecting)
-      this.logger.log(`Dispose of transport`);
-      this.transport.dispose().catch((error: Error) => {
-        this.logger.error(error.message);
-        throw error;
-      });
+      // Dispose of the transport(s) (disconnecting)
+      this.logger.log(`Dispose of transport(s)`);
+      this._transports.forEach((t) =>
+        t.dispose().catch((error: Error) => {
+          this.logger.error(error.message);
+        })
+      );
 
-      // Dispose of the user agent core (resetting)
-      this.logger.log(`Dispose of core`);
-      this.userAgentCore.dispose();
+      // Dispose of the user agent core(s) (resetting)
+      this.logger.log(`Dispose of core(s)`);
+      this._userAgentCores.forEach((c) => c.dispose());
 
       // Reset dialogs and registrations
       this._publishers = {};
@@ -503,8 +548,8 @@ export class UserAgent {
     const registerers = { ...this._registerers };
     const sessions = { ...this._sessions };
     const subscriptions = { ...this._subscriptions };
-    const transport = this.transport;
-    const userAgentCore = this.userAgentCore;
+    const transports = this._transports.slice();
+    const userAgentCores = this._userAgentCores.slice();
 
     //
     // At this point we have completed the state transition and everything
@@ -565,16 +610,18 @@ export class UserAgent {
       }
     }
 
-    // Dispose of the transport (disconnecting)
-    this.logger.log(`Dispose of transport`);
-    await transport.dispose().catch((error: Error) => {
-      this.logger.error(error.message);
-      throw error;
-    });
+    // Dispose of the transport(s) (disconnecting)
+    this.logger.log(`Dispose of transport(s)`);
+    for (const t of transports) {
+      await t.dispose().catch((error: Error) => {
+        this.logger.error(error.message);
+        throw error;
+      });
+    }
 
-    // Dispose of the user agent core (resetting)
-    this.logger.log(`Dispose of core`);
-    userAgentCore.dispose();
+    // Dispose of the user agent core(s) (resetting)
+    this.logger.log(`Dispose of core(s)`);
+    userAgentCores.forEach((c) => c.dispose());
 
     // Transition state
     this.transitionState(UserAgentState.Stopped);
@@ -589,29 +636,79 @@ export class UserAgent {
   }
 
   /**
-   * Attempt reconnection up to `maxReconnectionAttempts` times.
-   * @param reconnectionAttempt - Current attempt number.
+   * Connect all transports in parallel. Resolves when at least one succeeds;
+   * rejects only if every transport fails (returns the first error in that case).
    */
-  private attemptReconnection(reconnectionAttempt = 1): void {
+  private connectAllTransports(): Promise<void> {
+    let successCount = 0;
+    let failCount = 0;
+    let firstError: Error | undefined;
+
+    return new Promise<void>((resolve, reject) => {
+      const total = this._transports.length;
+      this._transports.forEach((t) => {
+        t.connect()
+          .then(() => {
+            successCount++;
+            if (successCount === 1) {
+              resolve();
+            }
+          })
+          .catch((error: Error) => {
+            failCount++;
+            if (!firstError) {
+              firstError = error instanceof Error ? error : new Error(String(error));
+            }
+            if (failCount === total) {
+              reject(firstError);
+            }
+          });
+      });
+    });
+  }
+
+  /**
+   * Attempt reconnection for a specific transport up to `reconnectionAttempts` times.
+   * @param transportIndex - Index into `_transports` identifying which connection to reconnect.
+   * @param reconnectionAttempt - Current attempt number for this transport.
+   */
+  private attemptReconnection(transportIndex: number, reconnectionAttempt = 1): void {
     const reconnectionAttempts = this.options.reconnectionAttempts;
     const reconnectionDelay = this.options.reconnectionDelay;
+    const transport = this._transports[transportIndex];
 
-    if (reconnectionAttempt > reconnectionAttempts) {
-      this.logger.log(`Maximum reconnection attempts reached`);
+    if (!transport) {
       return;
     }
 
-    this.logger.log(`Reconnection attempt ${reconnectionAttempt} of ${reconnectionAttempts} - trying`);
+    // Label used in log messages to identify the connection.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const label = (transport as any)._server ?? `#${transportIndex}`;
+
+    if (reconnectionAttempt > reconnectionAttempts) {
+      this.logger.log(`[${label}] Maximum reconnection attempts reached`);
+      return;
+    }
+
+    this.logger.log(`[${label}] Reconnection attempt ${reconnectionAttempt} of ${reconnectionAttempts} - trying`);
     setTimeout(
       () => {
-        this.reconnect()
+        if (this.state === UserAgentState.Stopped) {
+          return;
+        }
+        transport
+          .connect()
           .then(() => {
-            this.logger.log(`Reconnection attempt ${reconnectionAttempt} of ${reconnectionAttempts} - succeeded`);
+            this.logger.log(
+              `[${label}] Reconnection attempt ${reconnectionAttempt} of ${reconnectionAttempts} - succeeded`
+            );
           })
           .catch((error: Error) => {
             this.logger.error(error.message);
-            this.logger.log(`Reconnection attempt ${reconnectionAttempt} of ${reconnectionAttempts} - failed`);
-            this.attemptReconnection(++reconnectionAttempt);
+            this.logger.log(
+              `[${label}] Reconnection attempt ${reconnectionAttempt} of ${reconnectionAttempts} - failed`
+            );
+            this.attemptReconnection(transportIndex, ++reconnectionAttempt);
           });
       },
       reconnectionAttempt === 1 ? 0 : reconnectionDelay * 1000
@@ -664,9 +761,9 @@ export class UserAgent {
   }
 
   /**
-   * Initialize user agent core.
+   * Initialize user agent core bound to the given transport.
    */
-  private initCore(): UserAgentCore {
+  private initCore(transport: Transport): UserAgentCore {
     // supported options
     let supportedOptionTags: Array<string> = [];
     supportedOptionTags.push("outbound"); // TODO: is this really supported?
@@ -713,7 +810,7 @@ export class UserAgent {
         return new DigestAuthentication(this.getLoggerFactory(), ha1, username, password);
       },
       authorizationJwtFactory: this.options.authorizationJwt ? () => this.options.authorizationJwt!() : undefined,
-      transportAccessor: () => this.transport
+      transportAccessor: () => transport
     };
 
     const userAgentCoreDelegate: UserAgentCoreDelegate = {
@@ -886,43 +983,68 @@ export class UserAgent {
     return new UserAgentCore(userAgentCoreConfiguration, userAgentCoreDelegate);
   }
 
-  private initTransportCallbacks(): void {
-    this.transport.onConnect = (): void => this.onTransportConnect();
-    this.transport.onDisconnect = (error?: Error): void => this.onTransportDisconnect(error);
-    this.transport.onMessage = (message: string): void => this.onTransportMessage(message);
+  /**
+   * Create a Transport + UserAgentCore pair for the given transport options and
+   * register them in `_transports` / `_userAgentCores`.
+   */
+  private addTransportAndCore(transportOptions: unknown): void {
+    const index = this._transports.length;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const server: string = (transportOptions as any)?.server ?? "";
+    const label = server || `#${index}`;
+
+    const transport = new this.options.transportConstructor(
+      this.getLogger(`sip.Transport[${label}]`),
+      transportOptions
+    );
+    const core = this.initCore(transport);
+
+    transport.onConnect = (): void => this.onTransportConnect(label);
+    transport.onDisconnect = (error?: Error): void => this.onTransportDisconnect(index, label, error);
+    transport.onMessage = (message: string): void => this.onTransportMessage(message, core, label);
+
+    this._transports.push(transport);
+    this._userAgentCores.push(core);
+    this._reconnectionAttempts.push(0);
   }
 
-  private onTransportConnect(): void {
+  private onTransportConnect(label: string): void {
     if (this.state === UserAgentState.Stopped) {
       return;
     }
+    this.logger.log(`[${label}] Connected`);
     if (this.delegate && this.delegate.onConnect) {
       this.delegate.onConnect();
     }
   }
 
-  private onTransportDisconnect(error?: Error): void {
+  private onTransportDisconnect(transportIndex: number, label: string, error?: Error): void {
     if (this.state === UserAgentState.Stopped) {
       return;
+    }
+    if (error) {
+      this.logger.warn(`[${label}] Disconnected with error: ${error.message}`);
+    } else {
+      this.logger.log(`[${label}] Disconnected`);
     }
     if (this.delegate && this.delegate.onDisconnect) {
       this.delegate.onDisconnect(error);
     }
     // Only attempt to reconnect if network/server dropped the connection.
     if (error && this.options.reconnectionAttempts > 0) {
-      this.attemptReconnection();
+      this.attemptReconnection(transportIndex);
     }
   }
 
-  private onTransportMessage(messageString: string): void {
+  private onTransportMessage(messageString: string, core: UserAgentCore, label: string): void {
     const message = Parser.parseMessage(messageString, this.getLogger("sip.Parser"));
     if (!message) {
-      this.logger.warn("Failed to parse incoming message. Dropping.");
+      this.logger.warn(`[${label}] Failed to parse incoming message. Dropping.`);
       return;
     }
 
     if (this.state === UserAgentState.Stopped && message instanceof IncomingRequestMessage) {
-      this.logger.warn(`Received ${message.method} request while stopped. Dropping.`);
+      this.logger.warn(`[${label}] Received ${message.method} request while stopped. Dropping.`);
       return;
     }
 
@@ -954,7 +1076,7 @@ export class UserAgent {
       // Custom SIP.js check to reject request from ourself (this instance of SIP.js).
       // This is port of SanityCheck.rfc3261_16_3_4().
       if (!message.toTag && message.callId.substr(0, 5) === this.options.sipjsId) {
-        this.userAgentCore.replyStateless(message, { statusCode: 482 });
+        core.replyStateless(message, { statusCode: 482 });
         return;
       }
 
@@ -964,7 +1086,7 @@ export class UserAgent {
       const len: number = utf8Length(message.body);
       const contentLength: string | undefined = message.getHeader("content-length");
       if (contentLength && len < Number(contentLength)) {
-        this.userAgentCore.replyStateless(message, { statusCode: 400 });
+        core.replyStateless(message, { statusCode: 400 });
         return;
       }
     }
@@ -1005,13 +1127,13 @@ export class UserAgent {
 
     // Handle Request
     if (message instanceof IncomingRequestMessage) {
-      this.userAgentCore.receiveIncomingRequestFromTransport(message);
+      core.receiveIncomingRequestFromTransport(message);
       return;
     }
 
     // Handle Response
     if (message instanceof IncomingResponseMessage) {
-      this.userAgentCore.receiveIncomingResponseFromTransport(message);
+      core.receiveIncomingResponseFromTransport(message);
       return;
     }
 
