@@ -387,7 +387,7 @@ export class Transport implements TransportDefinition {
 
   private _send(message: string): Promise<void> {
     if (this.configuration.traceSip === true) {
-      this.logger.log("Sending WebSocket message:\n\n" + message + "\n");
+      this.logger.debug("Sending WebSocket message (" + message.length + " bytes):\n\n" + message + "\n");
     }
 
     if (this._state !== TransportState.Connected) {
@@ -467,7 +467,7 @@ export class Transport implements TransportDefinition {
         this.pushLatencySample(rttMs);
       }
       if (this.configuration.traceSip === true) {
-        this.logger.log("Received WebSocket message with CRLF Keep Alive response");
+        this.logger.debug("Received WebSocket message with CRLF Keep Alive response");
       }
       return;
     }
@@ -497,7 +497,7 @@ export class Transport implements TransportDefinition {
       // WebSocket text message.
       finishedData = data;
       if (this.configuration.traceSip === true) {
-        this.logger.log("Received WebSocket text message:\n\n" + finishedData + "\n");
+        this.logger.log("Received WebSocket text message (" + finishedData.length + " bytes):\n\n" + finishedData + "\n");
       }
     }
 
