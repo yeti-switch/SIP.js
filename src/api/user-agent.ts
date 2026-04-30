@@ -1020,8 +1020,8 @@ export class UserAgent {
     );
     const core = this.initCore(transport);
 
-    transport.onConnect = (): void => this.onTransportConnect(label);
-    transport.onDisconnect = (error?: Error): void => this.onTransportDisconnect(index, label, error);
+    transport.onConnect = (): void => this.onTransportConnect(core, label);
+    transport.onDisconnect = (error?: Error): void => this.onTransportDisconnect(index, core, label, error);
     transport.onMessage = (message: string): void => this.onTransportMessage(message, core, label);
 
     this._transports.push(transport);
@@ -1029,17 +1029,17 @@ export class UserAgent {
     this._reconnectionAttempts.push(0);
   }
 
-  private onTransportConnect(label: string): void {
+  private onTransportConnect(core: UserAgentCore, label: string): void {
     if (this.state === UserAgentState.Stopped) {
       return;
     }
     this.logger.log(`[${label}] Connected`);
     if (this.delegate && this.delegate.onConnect) {
-      this.delegate.onConnect();
+      this.delegate.onConnect(core);
     }
   }
 
-  private onTransportDisconnect(transportIndex: number, label: string, error?: Error): void {
+  private onTransportDisconnect(transportIndex: number, core: UserAgentCore, label: string, error?: Error): void {
     if (this.state === UserAgentState.Stopped) {
       return;
     }
@@ -1049,7 +1049,7 @@ export class UserAgent {
       this.logger.log(`[${label}] Disconnected`);
     }
     if (this.delegate && this.delegate.onDisconnect) {
-      this.delegate.onDisconnect(error);
+      this.delegate.onDisconnect(error, core);
     }
     // Only attempt to reconnect if network/server dropped the connection.
     if (error && this.options.reconnectionAttempts > 0) {

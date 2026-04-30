@@ -1,6 +1,7 @@
 import { IncomingReferRequest } from "../core/messages/methods/refer.js";
 import { IncomingRegisterRequest } from "../core/messages/methods/register.js";
 import { IncomingSubscribeRequest } from "../core/messages/methods/subscribe.js";
+import { UserAgentCore } from "../core/user-agent-core/user-agent-core.js";
 import { Invitation } from "./invitation.js";
 import { Message } from "./message.js";
 import { Notification } from "./notification.js";
@@ -14,14 +15,20 @@ import { Subscription } from "./subscription.js";
 export interface UserAgentDelegate {
   /**
    * Called upon transport transitioning to connected state.
+   * @param core - The {@link UserAgentCore} bound to the transport that connected.
+   *   In multi-transport (RFC 5626) setups this lets the application route the
+   *   event to the matching `Registerer` (the one constructed with this core).
+   *   In single-transport setups this is `userAgent.userAgentCore`.
    */
-  onConnect?(): void;
+  onConnect?(core?: UserAgentCore): void;
 
   /**
    * Called upon transport transitioning from connected state.
    * @param error - An error if disconnect triggered by transport. Otherwise undefined.
+   * @param core - The {@link UserAgentCore} bound to the transport that disconnected.
+   *   See {@link UserAgentDelegate.onConnect} for usage.
    */
-  onDisconnect?(error?: Error): void;
+  onDisconnect?(error?: Error, core?: UserAgentCore): void;
 
   /**
    * Called upon receipt of an invitation.
