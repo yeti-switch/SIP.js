@@ -61,15 +61,16 @@ export class LoggerFactory {
   }
 
   public getLogger(category: string, label?: string): Logger {
-    if (label && this.level === 3) {
-      return new Logger(this, category, label);
-    } else if (this.loggers[category]) {
-      return this.loggers[category];
-    } else {
-      const logger = new Logger(this, category);
-      this.loggers[category] = logger;
-      return logger;
+    // Cache key includes the label so that two callers asking for the same
+    // category with different labels get distinct loggers. Previously labels
+    // were honored only at debug level; now they are honored at every level.
+    const key = label ? `${category}|${label}` : category;
+    if (this.loggers[key]) {
+      return this.loggers[key];
     }
+    const logger = new Logger(this, category, label);
+    this.loggers[key] = logger;
+    return logger;
   }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any

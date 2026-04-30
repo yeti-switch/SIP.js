@@ -142,7 +142,7 @@ export class Registerer {
     }
 
     // initialize logger
-    this.logger = userAgent.getLogger("sip.Registerer");
+    this.logger = userAgent.getLogger("sip.Registerer", this.core.label || undefined);
 
     if (this.options.logConfiguration) {
       this.logger.log("Configuration:");

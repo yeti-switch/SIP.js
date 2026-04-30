@@ -1,5 +1,5 @@
 import { Registerer, RegistererState, UserAgent, UserAgentOptions } from "../../../lib/api/index.js";
-import { Logger } from "../../../lib/core/index.js";
+import { Logger, UserAgentCore } from "../../../lib/core/index.js";
 import { EmitterSpy, makeEmitterSpy } from "../../support/api/emitter-spy.js";
 import { connectUserFake, makeUserFake, UserFake } from "../../support/api/user-fake.js";
 import { TransportFake } from "../../support/api/transport-fake.js";
@@ -89,8 +89,85 @@ describe("API Registration Outbound (multi-transport)", () => {
       expect(alice.userAgentCores.length).toBe(2);
     });
 
+    it("each UserAgentCore carries its resolved-server label", () => {
+      expect(alice.userAgentCores[0].label).toBe("wss://192.0.2.1:5061/ws");
+      expect(alice.userAgentCores[1].label).toBe("wss://192.0.2.2:5061/ws");
+    });
+
+    it("two Registerers bound to different cores get distinct loggers", () => {
+      const reg1 = new Registerer(alice, { userAgentCore: alice.userAgentCores[0] });
+      const reg2 = new Registerer(alice, { userAgentCore: alice.userAgentCores[1] });
+      // The Registerer derives its logger label from `core.label`. With two
+      // different cores, the LoggerFactory cache key differs, so distinct
+      // Logger instances are returned. (Without the per-(category,label)
+      // cache fix, both Registerers would share one cached logger.)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((reg1 as any).logger).not.toBe((reg2 as any).logger);
+    });
+
     it("isConnected() returns true when at least one transport is connected", () => {
       expect(alice.isConnected()).toBeTrue();
+    });
+
+    describe("delegate.onConnect / onDisconnect carry the bound core", () => {
+      it("onConnect receives the core bound to the (re)connecting transport", async () => {
+        const seen: UserAgentCore[] = [];
+        alice.delegate = {
+          onConnect: (core?: UserAgentCore): void => {
+            if (core) {
+              seen.push(core);
+            }
+          }
+        };
+
+        // Reconnect transport 0 only.
+        await aliceTransports[0].disconnect();
+        await aliceTransports[0].connect();
+        await soon();
+        expect(seen.length).toBe(1);
+        expect(seen[0]).toBe(alice.userAgentCores[0]);
+
+        // Reconnect transport 1 only.
+        await aliceTransports[1].disconnect();
+        await aliceTransports[1].connect();
+        await soon();
+        expect(seen.length).toBe(2);
+        expect(seen[1]).toBe(alice.userAgentCores[1]);
+      });
+
+      it("onDisconnect receives the core bound to the dropping transport", async () => {
+        const seen: Array<{ error: Error | undefined; core: UserAgentCore | undefined }> = [];
+        alice.delegate = {
+          onDisconnect: (error?: Error, core?: UserAgentCore): void => {
+            seen.push({ error, core });
+          }
+        };
+
+        // Application-initiated disconnect: error is undefined; core is the matching one.
+        // (TransportFake.disconnect has no error path, so the error-disconnect branch
+        // — which would also trigger reconnection attempts — isn't covered here.)
+        await aliceTransports[1].disconnect();
+        await soon();
+        expect(seen.length).toBe(1);
+        expect(seen[0].error).toBeUndefined();
+        expect(seen[0].core).toBe(alice.userAgentCores[1]);
+      });
+
+      it("onConnect with no parameters (legacy signature) still works", async () => {
+        let calls = 0;
+        // Simulate an app written before the `core` argument existed:
+        // declare onConnect with zero parameters. This must still compile and
+        // run — the extra argument is ignored at the JS level.
+        alice.delegate = {
+          onConnect: (): void => {
+            calls++;
+          }
+        };
+        await aliceTransports[0].disconnect();
+        await aliceTransports[0].connect();
+        await soon();
+        expect(calls).toBe(1);
+      });
     });
 
     describe("REGISTER routing and RFC 5626 headers", () => {
@@ -214,6 +291,13 @@ describe("API Registration Outbound (multi-transport)", () => {
 
     it("userAgentCore getter returns the same object as userAgentCores[0]", () => {
       expect(alice.userAgent.userAgentCore).toBe(alice.userAgent.userAgentCores[0]);
+    });
+
+    it("the sole core's label reflects the configured server (or empty if none)", () => {
+      // makeUserFake doesn't pass a transportOptions.server, so the label
+      // falls back to the `#0` index slot used by addTransportAndCore.
+      expect(typeof alice.userAgent.userAgentCore.label).toBe("string");
+      expect(alice.userAgent.userAgentCore.label.length).toBeGreaterThan(0);
     });
 
     it("transport getter returns the same object as the single transport", () => {

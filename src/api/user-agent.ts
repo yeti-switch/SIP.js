@@ -783,8 +783,11 @@ export class UserAgent {
 
   /**
    * Initialize user agent core bound to the given transport.
+   * @param transport - The transport this core dispatches over.
+   * @param label - Per-connection label propagated to the core for use in
+   *   bound components' loggers.
    */
-  private initCore(transport: Transport): UserAgentCore {
+  private initCore(transport: Transport, label = ""): UserAgentCore {
     // supported options
     let supportedOptionTags: Array<string> = [];
     supportedOptionTags.push("outbound"); // TODO: is this really supported?
@@ -1001,7 +1004,7 @@ export class UserAgent {
       }
     };
 
-    return new UserAgentCore(userAgentCoreConfiguration, userAgentCoreDelegate);
+    return new UserAgentCore(userAgentCoreConfiguration, userAgentCoreDelegate, label);
   }
 
   /**
@@ -1018,7 +1021,7 @@ export class UserAgent {
       this.getLogger(`sip.Transport[${label}]`),
       transportOptions
     );
-    const core = this.initCore(transport);
+    const core = this.initCore(transport, label);
 
     transport.onConnect = (): void => this.onTransportConnect(core, label);
     transport.onDisconnect = (error?: Error): void => this.onTransportDisconnect(index, core, label, error);

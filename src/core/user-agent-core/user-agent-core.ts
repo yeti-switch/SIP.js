@@ -65,6 +65,12 @@ export class UserAgentCore {
   public delegate: UserAgentCoreDelegate;
   /** Dialogs. */
   public dialogs: Map<string, Dialog>;
+  /**
+   * Per-connection label (e.g. the WSS server URL or `#<index>`) used to
+   * tag log lines from components that are bound to this core. Empty string
+   * for single-transport setups that didn't supply one.
+   */
+  public readonly label: string;
   /** Subscribers. */
   public subscribers: Map<string, SubscribeUserAgentClient>;
   /** UACs. */
@@ -78,13 +84,16 @@ export class UserAgentCore {
    * Constructor.
    * @param configuration - Configuration.
    * @param delegate - Delegate.
+   * @param label - Optional per-connection label used by bound components when
+   *   constructing their loggers. See {@link UserAgentCore.label}.
    */
-  constructor(configuration: UserAgentCoreConfiguration, delegate: UserAgentCoreDelegate = {}) {
+  constructor(configuration: UserAgentCoreConfiguration, delegate: UserAgentCoreDelegate = {}, label = "") {
     this.configuration = configuration;
     this.delegate = delegate;
     this.dialogs = new Map<string, Dialog>();
     this.subscribers = new Map<string, SubscribeUserAgentClient>();
-    this.logger = configuration.loggerFactory.getLogger("sip.user-agent-core");
+    this.label = label;
+    this.logger = configuration.loggerFactory.getLogger("sip.user-agent-core", label || undefined);
   }
 
   /** Destructor. */
